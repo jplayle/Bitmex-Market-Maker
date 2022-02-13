@@ -1,12 +1,12 @@
 #include <unordered_map>
 #include <iostream>
 #include <memory>
+#include <deque>
 
 #include "../simdjson.h"
 #include "OrderBook.hpp"
 #include "WebSocketSecure.hpp"
 #include "TradeLogic.hpp"
-#include "REST.hpp"
 
 using namespace simdjson;
 
@@ -41,8 +41,6 @@ class OrderBookStream : public TradeLogic
 	double best_ask;
 	
 	bool is_bba_upd;
-	
-	std::shared_ptr<REST> rest_ptr;
 	
 	
 	void get_orderBook_snapshot()
@@ -148,58 +146,42 @@ class OrderBookStream : public TradeLogic
 	{
 		vol_ratio = get_vol_ratio();
 		
-		if (check_bid_upd())
-		{
-			rest_ptr->send_update_order(Upd_Order_Msg.single_order_msg);
-		}
-		if (check_ask_upd())
-		{
-			rest_ptr->send_update_order(Upd_Order_Msg.single_order_msg);
-		}
+		check_bid_upd();
+		check_ask_upd();
 	}
 	
 	inline void on_insert_or_delete()
 	{
 		on_update();
+
+		check_bid_posn_upd();
+		best_bid = tv.targ_posn_bid.load();
 		
-		if (check_bid_posn_upd())
-		{
-			rest_ptr->send_update_order(Upd_Order_Msg.single_order_msg);
-			best_bid = tv.targ_posn_bid.load();
-		}
-		if (check_ask_posn_upd())
-		{
-			rest_ptr->send_update_order(Upd_Order_Msg.single_order_msg);
-			best_ask = tv.targ_posn_ask.load();
-		}
+		check_ask_posn_upd();
+		best_ask = tv.targ_posn_ask.load();
 	}
 	
 	void init_trading()
 	{
 		get_bba();
+		
 		vol_ratio = get_vol_ratio();
 		
 		update_targ_prices(vol_ratio, best_bid, best_ask);
 		
 		init_bid_order();
-		tm._write_lock(write_mutex, write_cv, can_write);
-		rest_ptr->send_new_order(New_Order_Msg.single_order_msg);
-		
 		init_ask_order();
-		tm._write_lock(write_mutex, write_cv, can_write);
-		rest_ptr->send_new_order(New_Order_Msg.single_order_msg);
 	}
 	
 public:
-	OrderBookStream(std::mutex&              wm,
-					std::condition_variable& wcv,
-					bool&                    cw,
-					std::shared_ptr<REST>&   rp)
+	OrderBookStream(std::deque<std::string>& noq,
+			  		std::deque<std::string>& uoq,
+			  		std::mutex&              qm,
+			  		std::condition_variable& qcv,
+			  		bool&                    cm)
 					:
-					TradeLogic(wm, wcv, cw), rest_ptr(rp)
-	{		
-		rest_ptr->run_rest_service();
-	}
+					TradeLogic(noq, uoq, qm, qcv, cm)
+	{}
 	
 	void run()
 	{

@@ -9,7 +9,6 @@
 #include "TradeLogic.hpp"
 #include "Semaphore.hpp"
 #include "Auth.hpp"
-#include "REST.hpp"
 
 using namespace simdjson;
 
@@ -17,9 +16,12 @@ using namespace simdjson;
 class OrderUpdateStream : public Auth
 {
 	Semaphore                tm;
-	std::mutex&              write_mutex;
-	std::condition_variable& write_cv;
-	bool&                    can_write;
+	std::mutex&              q_mutex;
+	std::condition_variable& q_cv;
+	bool&                    can_mod;
+	
+	std::deque<std::string>& new_order_q;
+	std::deque<std::string>& upd_order_q;
 	
 	WSS ws{"/realtime"};
 	
@@ -30,8 +32,6 @@ class OrderUpdateStream : public Auth
 	
 	dom::parser json_parser;
 	dom::array  msg_data;
-	
-	std::shared_ptr<REST> rest_ptr;
 	
 	typedef void (OrderUpdateStream::*pfunc)(const dom::object& d);
 	
@@ -65,24 +65,27 @@ class OrderUpdateStream : public Auth
 		uint64_t leavesQty   = d["leavesQty"];
 		tv.targ_ask_posn_vol = d["cumQty"];
 		
-		tm._write_lock(write_mutex, write_cv, can_write);
+		if (leavesQty == 0) { tv.bid_open = false; }
 		
-		if (leavesQty == 0) { tv.bid_clOrdID = 0; }
-		
-		if (tv.ask_posn_clOrdID)
+		if (tv.ask_posn_open)
 		{
 			Upd_Order_Message.build_update_vol_order(tv.ask_posn_clOrdID, tv.targ_ask_posn_vol);
 			
-			rest_ptr->send_update_order(Upd_Order_Message.single_order_msg);
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			upd_order_q.push_back(Upd_Order_Message.single_order_msg);
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
 		else
 		{
 			tv.ask_posn_clOrdID = ++tv.clOrdID_count;
 			
 			New_Order_Message.build_new_ask_order(tv.ask_posn_clOrdID, tv.targ_posn_ask, tv.targ_ask_posn_vol);
-			tv.curr_posn_ask = tv.targ_posn_ask.load();
 			
-			rest_ptr->send_new_order(New_Order_Message.single_order_msg);
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			new_order_q.push_back(New_Order_Message.single_order_msg);
+			tv.curr_posn_ask = tv.targ_posn_ask.load();
+			tv.ask_posn_open = true;
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
 	}
 	
@@ -91,24 +94,27 @@ class OrderUpdateStream : public Auth
 		uint64_t leavesQty   = d["leavesQty"];
 		tv.targ_bid_posn_vol = d["cumQty"];
 		
-		tm._write_lock(write_mutex, write_cv, can_write);
+		if (leavesQty == 0) { tv.ask_open = false; }
 		
-		if (leavesQty == 0) { tv.ask_clOrdID = 0; }
-		
-		if (tv.bid_posn_clOrdID)
+		if (tv.bid_posn_open)
 		{
 			Upd_Order_Message.build_update_vol_order(tv.bid_posn_clOrdID, tv.targ_bid_posn_vol);
 			
-			rest_ptr->send_update_order(Upd_Order_Message.single_order_msg);
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			upd_order_q.push_back(Upd_Order_Message.single_order_msg);
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
 		else
 		{
 			tv.bid_posn_clOrdID = ++tv.clOrdID_count;
 			
 			New_Order_Message.build_new_bid_order(tv.bid_posn_clOrdID, tv.targ_posn_bid, tv.targ_bid_posn_vol);
-			tv.curr_posn_bid = tv.targ_posn_bid.load();
 			
-			rest_ptr->send_new_order(New_Order_Message.single_order_msg);
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			new_order_q.push_back(New_Order_Message.single_order_msg);
+			tv.curr_posn_bid = tv.targ_posn_bid.load();
+			tv.bid_posn_open = true;
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
 	}
 	
@@ -117,24 +123,27 @@ class OrderUpdateStream : public Auth
 		uint64_t leavesQty = d["leavesQty"];
 		tv.targ_ask_vol    = d["cumQty"];
 		
-		tm._write_lock(write_mutex, write_cv, can_write);
+		if (leavesQty == 0) { tv.bid_posn_open = false; }
 		
-		if (leavesQty == 0) { tv.bid_posn_clOrdID = 0; }
-		
-		if (tv.ask_clOrdID)
+		if (tv.ask_open)
 		{
 			Upd_Order_Message.build_update_vol_order(tv.ask_clOrdID, tv.targ_ask_vol);
 			
-			rest_ptr->send_update_order(Upd_Order_Message.single_order_msg);
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			upd_order_q.push_back(Upd_Order_Message.single_order_msg);
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
 		else
 		{
 			tv.ask_clOrdID = ++tv.clOrdID_count;
 			
 			New_Order_Message.build_new_ask_order(tv.ask_clOrdID, tv.targ_ask, tv.targ_ask_vol);
-			tv.curr_ask = tv.targ_ask.load();
 			
-			rest_ptr->send_new_order(New_Order_Message.single_order_msg);
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			new_order_q.push_back(New_Order_Message.single_order_msg);
+			tv.curr_ask = tv.targ_ask.load();
+			tv.ask_open = true;
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
 	}
 	
@@ -143,35 +152,103 @@ class OrderUpdateStream : public Auth
 		uint64_t leavesQty = d["leavesQty"];
 		tv.targ_bid_vol    = d["cumQty"];
 		
-		tm._write_lock(write_mutex, write_cv, can_write);
+		if (leavesQty == 0) { tv.ask_posn_open = false; }
 		
-		if (leavesQty == 0) { tv.ask_posn_clOrdID = 0; }
-		
-		if (tv.bid_clOrdID)
+		if (tv.bid_open)
 		{
 			Upd_Order_Message.build_update_vol_order(tv.bid_clOrdID, tv.targ_bid_vol);
 			
-			rest_ptr->send_update_order(Upd_Order_Message.single_order_msg);
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			upd_order_q.push_back(Upd_Order_Message.single_order_msg);
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
 		else
 		{
 			tv.bid_clOrdID = ++tv.clOrdID_count;
 			
 			New_Order_Message.build_new_bid_order(tv.bid_clOrdID, tv.targ_bid, tv.targ_bid_vol);
-			tv.curr_bid = tv.targ_bid.load();
 			
-			rest_ptr->send_new_order(New_Order_Message.single_order_msg);
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			new_order_q.push_back(New_Order_Message.single_order_msg);
+			tv.curr_bid = tv.targ_bid.load();
+			tv.bid_open = true;
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
 	}
 	
+	inline void on_bid_cancelled()
+	{
+		tv.bid_open = false;
+		
+		tv.bid_clOrdID = ++tv.clOrdID_count;
+			
+		New_Order_Message.build_new_bid_order(tv.bid_clOrdID, tv.targ_bid, tv.targ_bid_vol);
+		tv.curr_bid = tv.targ_bid.load();
+		
+		tm._get_lock(q_mutex, q_cv, can_mod);
+		new_order_q.push_back(New_Order_Message.single_order_msg);
+		tv.curr_bid = tv.targ_bid.load();
+		tv.bid_open = true;
+		tm._unlock(q_mutex, q_cv, can_mod);
+	}
+	
+	inline void on_ask_cancelled()
+	{
+		tv.ask_open = false;
+		
+		tv.ask_clOrdID = ++tv.clOrdID_count;
+			
+		New_Order_Message.build_new_ask_order(tv.ask_clOrdID, tv.targ_ask, tv.targ_ask_vol);
+		
+		tm._get_lock(q_mutex, q_cv, can_mod);
+		new_order_q.push_back(New_Order_Message.single_order_msg);
+		tv.curr_ask = tv.targ_ask.load();
+		tv.ask_open = true;
+		tm._unlock(q_mutex, q_cv, can_mod);
+	}
+	
+	inline void on_bid_posn_cancelled()
+	{
+		tv.bid_posn_open = false;
+		
+		tv.bid_posn_clOrdID = ++tv.clOrdID_count;
+			
+		New_Order_Message.build_new_bid_order(tv.bid_posn_clOrdID, tv.targ_posn_bid, tv.targ_bid_posn_vol);
+		
+		tm._get_lock(q_mutex, q_cv, can_mod);
+		new_order_q.push_back(New_Order_Message.single_order_msg);
+		tv.curr_posn_bid = tv.targ_posn_bid.load();
+		tv.bid_posn_open = true;
+		tm._unlock(q_mutex, q_cv, can_mod);
+	}
+	
+	inline void on_ask_posn_cancelled()
+	{
+		tv.ask_posn_open = false;
+		
+		tv.ask_posn_clOrdID = ++tv.clOrdID_count;
+			
+		New_Order_Message.build_new_ask_order(tv.ask_posn_clOrdID, tv.targ_posn_ask, tv.targ_ask_posn_vol);
+		
+		tm._get_lock(q_mutex, q_cv, can_mod);
+		new_order_q.push_back(New_Order_Message.single_order_msg);
+		tv.curr_posn_ask = tv.targ_posn_ask.load();
+		tv.ask_posn_open = true;
+		tm._unlock(q_mutex, q_cv, can_mod);
+	}
+	
+	
 public:
-	OrderUpdateStream(std::mutex&            wm,
-					std::condition_variable& wcv,
-					bool&                    cw,
-					std::shared_ptr<REST>&   rp)
-					:
-					write_mutex(wm), write_cv(wcv), can_write(cw), rest_ptr(rp)
-	{}
+	explicit
+	OrderUpdateStream(std::deque<std::string>& noq,
+			  		  std::deque<std::string>& uoq,
+			  		  std::mutex&              qm,
+			  		  std::condition_variable& qcv,
+			  		  bool&                    cm)
+					  :
+					  new_order_q(noq), upd_order_q(uoq),
+			  		  q_mutex(qm), q_cv(qcv), can_mod(cm)
+					  {}
 	
 	void run()
 	{
@@ -207,24 +284,15 @@ public:
 						else if (clOrdID == tv.bid_posn_clOrdID) { on_bid_posn_fill(order_msg); }
 						else if (clOrdID == tv.ask_posn_clOrdID) { on_ask_posn_fill(order_msg); }
 					}
+					else if (ordStatus == "Canceled" || ordStatus == "Rejected")
+					{					
+						if      (clOrdID == tv.bid_clOrdID)      { on_bid_cancelled();      }
+						else if (clOrdID == tv.ask_clOrdID)      { on_ask_cancelled();      }
+						else if (clOrdID == tv.bid_posn_clOrdID) { on_bid_posn_cancelled(); }
+						else if (clOrdID == tv.ask_posn_clOrdID) { on_ask_posn_cancelled(); }
+					}
 				} catch (const simdjson_error &e) {}
 			}
 		}
 	}
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

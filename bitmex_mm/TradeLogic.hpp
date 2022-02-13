@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <deque>
 
 #include "BitwiseOperations.hpp"
 #include "OrderMessage.hpp"
@@ -40,10 +41,10 @@ struct TradeVariables {
 	static std::atomic<uint64_t> curr_bid_posn_vol;
 	static std::atomic<uint64_t> curr_ask_posn_vol;
 	
-    static std::atomic<uint64_t> bid_cumQty;
-    static std::atomic<uint64_t> ask_cumQty;
-    static std::atomic<uint64_t> bid_posn_cumQty;
-    static std::atomic<uint64_t> ask_posn_cumQty;
+    static std::atomic<bool> bid_open;
+	static std::atomic<bool> ask_open;
+	static std::atomic<bool> bid_posn_open;
+	static std::atomic<bool> ask_posn_open;
     
 	static std::atomic<uint64_t> clOrdID_count;
 	static std::atomic<uint64_t> bid_clOrdID;
@@ -57,9 +58,12 @@ class TradeLogic : public Bitwise
 {	
 protected:
 	Semaphore tm;
-	std::mutex&              write_mutex;
-	std::condition_variable& write_cv;
-	bool&                    can_write;
+	std::mutex&              q_mutex;
+	std::condition_variable& q_cv;
+	bool&                    can_mod;
+	
+	std::deque<std::string>& new_order_q;
+	std::deque<std::string>& upd_order_q;
 	
 	TradeVariables tv;
 	
@@ -74,8 +78,15 @@ protected:
 public:
 	double vol_ratio;
 	
-	TradeLogic(std::mutex& wm, std::condition_variable& wcv, bool& cw) : write_mutex(wm), write_cv(wcv), can_write(cw)
-	{}
+	TradeLogic(std::deque<std::string>& noq,
+			   std::deque<std::string>& uoq,
+			   std::mutex&              qm,
+			   std::condition_variable& qcv,
+			   bool&                    cm)
+			   :
+			   new_order_q(noq), upd_order_q(uoq),
+			   q_mutex(qm), q_cv(qcv), can_mod(cm)
+			   {}
 	
 	inline void update_targ_prices(double& vol_ratio, double& best_bid, double& best_ask)
 	{
@@ -114,7 +125,14 @@ public:
 		
 		New_Order_Msg.build_new_bid_order(tv.bid_clOrdID, tv.targ_bid, tv.targ_bid_vol);
 		
+		tm._get_lock(q_mutex, q_cv, can_mod);
+		
+		new_order_q.push_back(New_Order_Msg.single_order_msg);
+		
 		tv.curr_bid = tv.targ_bid.load();
+		tv.bid_open = true;
+		
+		tm._unlock(q_mutex, q_cv, can_mod);
 	}
 	
 	inline void init_ask_order()
@@ -125,60 +143,75 @@ public:
 		tv.ask_clOrdID = tv.clOrdID_count.load();
 		
 		New_Order_Msg.build_new_ask_order(tv.ask_clOrdID, tv.targ_ask, tv.targ_ask_vol);
+		
+		tm._get_lock(q_mutex, q_cv, can_mod);
+		std::cout << "ask put" << '\n';
+		new_order_q.push_back(New_Order_Msg.single_order_msg);
 	
 		tv.curr_ask = tv.targ_ask.load();
+		tv.ask_open = true;
+		
+		tm._unlock(q_mutex, q_cv, can_mod);
 	}
 	
-	inline bool check_bid_upd()
+	inline void check_bid_upd()
 	{	// bid offer
-		if ((tv.targ_bid - tv.curr_bid) * tv.bid_clOrdID)
-		{
-			tm._write_lock(write_mutex, write_cv, can_write);
-			
+		if ((tv.targ_bid - tv.curr_bid) * tv.bid_open)
+		{			
 			Upd_Order_Msg.build_update_price_order(tv.bid_clOrdID, tv.targ_bid);
+			
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			
+			upd_order_q.push_back(Upd_Order_Msg.single_order_msg);
 			tv.curr_bid = tv.targ_bid.load();
-			return true;
+			
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
-		return false;
 	}
 
-	inline bool check_ask_upd()
+	inline void check_ask_upd()
 	{	// ask offer
-		if ((tv.targ_ask - tv.curr_ask) * tv.ask_clOrdID)
-		{
-			tm._write_lock(write_mutex, write_cv, can_write);
-			
+		if ((tv.targ_ask - tv.curr_ask) * tv.ask_open)
+		{			
 			Upd_Order_Msg.build_update_price_order(tv.ask_clOrdID, tv.targ_ask);
+			
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			
+			upd_order_q.push_back(Upd_Order_Msg.single_order_msg);
 			tv.curr_ask = tv.targ_ask.load();
-			return true;
+			
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
-		return false;
 	}
 
-	inline bool check_bid_posn_upd()
+	inline void check_bid_posn_upd()
 	{	// bid position
-		if ((tv.targ_posn_bid - tv.curr_posn_bid) * tv.bid_posn_clOrdID)
-		{
-			tm._write_lock(write_mutex, write_cv, can_write);
-			
+		if ((tv.targ_posn_bid - tv.curr_posn_bid) * tv.bid_posn_open)
+		{			
 			Upd_Order_Msg.build_update_price_order(tv.bid_posn_clOrdID, tv.targ_posn_bid);
+			
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			
+			upd_order_q.push_back(Upd_Order_Msg.single_order_msg);
 			tv.curr_posn_bid = tv.targ_posn_bid.load();
-			return true;
+			
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
-		return false;
 	}
 
-	inline bool check_ask_posn_upd()
+	inline void check_ask_posn_upd()
 	{	// ask position
-		if ((tv.targ_posn_ask - tv.curr_posn_ask) * tv.ask_posn_clOrdID)
-		{
-			tm._write_lock(write_mutex, write_cv, can_write);
-			
+		if ((tv.targ_posn_ask - tv.curr_posn_ask) * tv.ask_posn_open)
+		{			
 			Upd_Order_Msg.build_update_price_order(tv.ask_posn_clOrdID, tv.targ_posn_ask);
+			
+			tm._get_lock(q_mutex, q_cv, can_mod);
+			
+			upd_order_q.push_back(Upd_Order_Msg.single_order_msg);
 			tv.curr_posn_ask = tv.targ_posn_ask.load();
-			return true;
+			
+			tm._unlock(q_mutex, q_cv, can_mod);
 		}
-		return false;
 	}
 };
 
@@ -208,10 +241,10 @@ std::atomic<uint64_t> TradeVariables::targ_ask_posn_vol = 0;
 std::atomic<uint64_t> TradeVariables::curr_bid_posn_vol = 0;
 std::atomic<uint64_t> TradeVariables::curr_ask_posn_vol = 0;
 
-std::atomic<uint64_t> TradeVariables::bid_cumQty      = 0;
-std::atomic<uint64_t> TradeVariables::ask_cumQty      = 0;
-std::atomic<uint64_t> TradeVariables::bid_posn_cumQty = 0;
-std::atomic<uint64_t> TradeVariables::ask_posn_cumQty = 0;
+std::atomic<bool> TradeVariables::bid_open      = false;
+std::atomic<bool> TradeVariables::ask_open      = false;
+std::atomic<bool> TradeVariables::bid_posn_open = false;
+std::atomic<bool> TradeVariables::ask_posn_open = false;
 
 std::atomic<uint64_t> TradeVariables::clOrdID_count    = 0;
 std::atomic<uint64_t> TradeVariables::bid_clOrdID      = 0;

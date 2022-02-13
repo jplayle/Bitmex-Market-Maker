@@ -1,14 +1,20 @@
+#include <deque>
+
 #include <boost/asio.hpp>
 
 #include "OrderBookStream.hpp"
 #include "OrderUpdateStream.hpp"
+#include "REST_Sync.hpp"
 
 
 class BitMEXMarketMaker
 {
-	std::mutex              write_mutex;
-	std::condition_variable write_cv;
-	bool                    can_write = true;
+	std::mutex              q_mutex;
+	std::condition_variable q_cv;
+	bool                    can_mod = true;
+	
+	std::deque<std::string> new_order_q;
+	std::deque<std::string> upd_order_q;
 	
 	
 public:
@@ -16,21 +22,16 @@ public:
 	{
 		std::cout << "BitMEX Market Maker." << '\n';
 		
-		// init REST thread objects
-		net::io_context rest_ioc;
-    	ssl::context    rest_ctx{ssl::context::tlsv12_client};
+		// start REST worker thread
+		REST_Sync rest_service(new_order_q, upd_order_q, q_mutex, q_cv, can_mod);
+		std::thread rest_thread([&]{ rest_service.run(); });
 		
-		auto rest_ptr = std::make_shared<REST>(write_mutex, write_cv, can_write, boost::asio::make_strand(rest_ioc), rest_ctx);
-		
-		// start order stream
-		OrderUpdateStream ous(write_mutex, write_cv, can_write, rest_ptr);
+		// start order management stream
+		OrderUpdateStream ous(new_order_q, upd_order_q, q_mutex, q_cv, can_mod);
 		std::thread ous_thread([&]{ ous.run(); });
 		
-		// init order book and start rest thread
-		OrderBookStream obs(write_mutex, write_cv, can_write, rest_ptr);
-		std::thread rest_thread([&]{ rest_ioc.run(); });
-		
-		// stream order book updates and make trading decisions
+		// start order book stream
+		OrderBookStream obs(new_order_q, upd_order_q, q_mutex, q_cv, can_mod);
 		obs.run();
 	}
 };

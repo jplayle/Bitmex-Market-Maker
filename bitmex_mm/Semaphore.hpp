@@ -6,22 +6,22 @@
 
 struct Semaphore {
 	
-	void _write_lock(std::mutex& async_write_mutex, std::condition_variable& write_cv, bool& can_write)
+	void _get_lock(std::mutex& async_write_mutex, std::condition_variable& write_cv, bool& got_lock)
 	{
 		std::unique_lock<std::mutex> lck(async_write_mutex);
-		write_cv.wait(lck, [&]{ return can_write; });
-		can_write = false;
+		write_cv.wait(lck, [&]{ return got_lock; });
+		got_lock = false;
 	}
 	
 	
-	bool _write_try_lock(std::mutex& async_write_mutex, std::condition_variable& write_cv, bool& can_write)
+	bool _try_lock(std::mutex& async_write_mutex, std::condition_variable& write_cv, bool& got_lock)
 	{
 		std::unique_lock<std::mutex> lck(async_write_mutex, std::try_to_lock);
 		if (lck.owns_lock())
 		{
-			if (can_write)
+			if (got_lock)
 			{
-				can_write = false;
+				got_lock = false;
 				return true;
 			}
 		}
@@ -29,11 +29,11 @@ struct Semaphore {
 	}
 	
 	
-	void _write_unlock(std::mutex& async_write_mutex, std::condition_variable& write_cv, bool& can_write)
+	void _unlock(std::mutex& async_write_mutex, std::condition_variable& write_cv, bool& got_lock)
 	{
 		{
 			std::unique_lock<std::mutex> lck(async_write_mutex);
-			can_write = true;
+			got_lock = true;
 		}
 		write_cv.notify_one();
 	}	
